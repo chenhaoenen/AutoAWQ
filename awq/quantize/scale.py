@@ -43,23 +43,17 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         prev_op.to(best_device)
         for layer in layers:
             layer.to(best_device)
+
         scales.to(best_device)
 
-        if (
-            isinstance(prev_op, nn.Linear)
-            and type(layers) == list
-            and isinstance(layers[0], nn.Linear)
-        ):
-            scale_fc_fcs(prev_op, layers, scales)
+        if (isinstance(prev_op, nn.Linear) and type(layers) == list and isinstance(layers[0], nn.Linear)):
+            scale_fc_fcs(prev_op, layers, scales) # w*s操作
 
         elif isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
 
-        elif (
-            any(isinstance(prev_op, t) for t in allowed_norms)
-            or "rmsnorm" in str(prev_op.__class__).lower()
-        ):
+        elif (any(isinstance(prev_op, t) for t in allowed_norms) or "rmsnorm" in str(prev_op.__class__).lower()):
             scale_ln_fcs(prev_op, layers, scales)
 
         elif any(isinstance(prev_op, t) for t in allowed_act_fns):
@@ -76,7 +70,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 # Skip the modules that are not quantized
                 if layer_name in input_feat_dict:
                     inp = input_feat_dict[layer_name]
-                    inp.div_(scales.view(1, -1).to(inp.device))
+                    inp.div_(scales.view(1, -1).to(inp.device)) # x/s 操作
 
         prev_op.cpu()
         for layer in layers:
@@ -144,7 +138,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
         fc1.bias.div_(scales.view(-1))
 
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))
+        fc.weight.mul_(scales.view(1, -1)) # w*s
 
     for p in fc1.parameters():
         assert torch.isnan(p).sum() == 0

@@ -74,12 +74,12 @@ class AwqQuantizer:
         org_w_shape = w.shape
         if self.group_size > 0:
             assert org_w_shape[-1] % self.group_size == 0
-            w = w.reshape(-1, self.group_size)
+            w = w.reshape(-1, self.group_size) # 是否做group_size, per_channel量化
         assert w.dim() == 2
         assert torch.isnan(w).sum() == 0
 
         # zero point quantization
-        if self.zero_point:
+        if self.zero_point: # 真正的量化操作，类似 gptq中的 find_params操作
             max_val = w.amax(dim=1, keepdim=True)
             min_val = w.amin(dim=1, keepdim=True)
             max_int = 2**self.w_bit - 1
@@ -162,29 +162,28 @@ class AwqQuantizer:
             # [STEP 2]: Compute and apply scale list
             module_config: List[Dict] = self.awq_model.get_layers_for_scaling(
                 self.modules[i], input_feat, self.module_kwargs
-            )
-            scales_list = [
-                self._search_best_scale(self.modules[i], **layer)
-                for layer in module_config
-            ]
-            apply_scale(self.modules[i], scales_list, input_feat_dict=input_feat)
+            ) # 用Qwen2举例， 这里搜索的就是 [qkv], [o], [up, gate], [down]
+
+            # 基于论文中网格搜索的方式，获取scale
+            scales_list = [self._search_best_scale(self.modules[i], **layer)for layer in module_config]
+
+            apply_scale(self.modules[i], scales_list, input_feat_dict=input_feat) # w*s 和 x/s操作
             scales_list = append_str_prefix(
                 scales_list, get_op_name(self.model, self.modules[i]) + "."
             )
 
             # [STEP 3]: Compute and apply clipping list
             if self.apply_clip:
-                clip_list = self._search_best_clip(
-                    self.modules[i], named_linears, input_feat
-                )
-                apply_clip(self.modules[i], clip_list)
+                #（基于网格搜索寻找max clip 值）
+                clip_list = self._search_best_clip(self.modules[i], named_linears, input_feat)
+                apply_clip(self.modules[i], clip_list) # 做clip 操作
                 clip_list = append_str_prefix(
                     clip_list, get_op_name(self.model, self.modules[i]) + "."
                 )
 
             # [STEP 4]: Quantize weights
             if not self.export_compatible:
-                self._apply_quant(self.modules[i], named_linears)
+                self._apply_quant(self.modules[i], named_linears) # 涉及到 marlin, gemm, gemv等优化
 
             clear_memory()
 
@@ -202,9 +201,8 @@ class AwqQuantizer:
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
 
-            linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(
-                linear_layer.weight.data
-            )
+            # 真正的 寻找 scale, zero等操作
+            linear_layer.weight.data, scales, zeros = self.pseudo_quantize_tensor(linear_layer.weight.data)
 
             if self.version == "gemm":
                 scales = scales.t().contiguous()
@@ -224,6 +222,8 @@ class AwqQuantizer:
             else:
                 raise ValueError(f"Unknown version {self.version}")
 
+
+            # 将普通的 nn.Linear操作转换为 自定义的QLinear 层， forward使用 自己写的cuda核函数操作，这里和 gptq类似
             q_linear = q_linear_module.from_linear(
                 linear=linear_layer,
                 w_bit=self.w_bit,
@@ -235,7 +235,7 @@ class AwqQuantizer:
 
             linear_layer.cpu()
             q_linear.to(next(module.parameters()).device)
-            set_op_by_name(module, name, q_linear)
+            set_op_by_name(module, name, q_linear) # 将 新得到的 QLinear 重新注入会module
             clear_memory()
 
     @torch.no_grad()
@@ -267,9 +267,9 @@ class AwqQuantizer:
     @torch.no_grad()
     def _search_best_scale(
         self,
-        module,
+        module, # 具体的module
         prev_op,
-        layers: List[nn.Linear],
+        layers: List[nn.Linear],  # 具体的 linear list， 比如说Qwen2 的 qkv这三个是一起的，因为他们的输入都相同
         inp: torch.Tensor,
         module2inspect=None,
         kwargs={},
@@ -286,24 +286,29 @@ class AwqQuantizer:
 
         # [STEP 1]: Compute per-channel mean of normalised weights
         # All layer weights are concatted together
-        weight = torch.cat([_m.weight for _m in layers], dim=0)
+        # # 将qkv的weight concate起来，三个一起操作么？
+        # 这里拿Qwen2-0.5B的qkv举例，k和v权重矩阵的维度为[128, 896], q矩阵的维度为[896, 896]
+        weight = torch.cat([_m.weight for _m in layers], dim=0) #[128+128+896, 896]
         org_shape = weight.shape
-        # The weights are reshaped to be organised by quantization group
-        weight = weight.view(-1, self.group_size)
+        # The weights are reshaped to be organised by quantization group,
+        # 这里默认的group_size和AutoGPTQ相同，都是128
+        weight = weight.view(-1, self.group_size) # [(128+128+896)*7, 128]
         # Calculates the relative magnitude of the weights within each of the quantization groups,
         # and rescales each group individually so that each group has weights on a 0-1 scale.
-        w_scale = weight.abs() / (weight.abs().amax(dim=1, keepdim=True) + 1e-6)
+        w_scale = weight.abs() / (weight.abs().amax(dim=1, keepdim=True) + 1e-6) # # [(128+128+896)*7, 128]
         # Resizes the rescaled weight matrix back up to its original dimensions
-        w_scale = w_scale.view(org_shape)
+        w_scale = w_scale.view(org_shape) # # [128+128+896, 128*7]
         # Gets the average rescaled magnitude for each output channel
-        w_mean = w_scale.mean(0)
+        w_mean = w_scale.mean(0) # [1, 128*7]
         clear_memory(weight)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # move inp to cpu to avoid memory leak
-        inp_flat = inp.cpu().abs().view(-1, inp.shape[-1])
-        num_elements = inp_flat.size(0)
-        num_channels = inp_flat.size(1)
+        inp_flat = inp.cpu().abs().view(-1, inp.shape[-1]) #[B*L, 896]
+        num_elements = inp_flat.size(0) # [B*L]
+        num_channels = inp_flat.size(1) # 896
+
+        # element_size 表示占用的bite数， 比如说 fp32占用4个字节，fp16占用2个字节
         element_size_bytes = inp_flat.element_size() * 2 # multiplied by 2 for FP32
 
         # Calculate chunk size dynamically based on max_chunk_memory
@@ -311,14 +316,14 @@ class AwqQuantizer:
         chunk_size = min(chunk_size, num_elements)
 
         # Use float32 for sum calculation
-        x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device)
+        x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device) # [896]
         
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
             chunk_sum = inp_flat[i:end].to(torch.float32).sum(dim=0)
             x_sum += chunk_sum.to(inp.device)
 
-        x_mean = (x_sum / num_elements).to(inp.dtype)
+        x_mean = (x_sum / num_elements).to(inp.dtype) # [896]
         clear_memory(x_sum)
 
         # [STEP 3]: Compute output of module
@@ -326,6 +331,13 @@ class AwqQuantizer:
             module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
             fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
 
+
+
+        """
+        inp [B, L, 896] 
+        w_mean [1, 128*7]
+        x_mean [896]
+        """
         # [STEP 4]: Compute loss
         best_scales = self._compute_best_scale(
             inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
@@ -339,9 +351,9 @@ class AwqQuantizer:
 
     def _compute_best_scale(
         self,
-        x: torch.Tensor,
-        w_mean: torch.Tensor,
-        x_mean: torch.Tensor,
+        x: torch.Tensor, #[B, L, 896]
+        w_mean: torch.Tensor, # [1, 127*8]
+        x_mean: torch.Tensor, # [896]
         module2inspect: torch.nn.Module,
         linears2scale: List[nn.Linear],
         fp16_output: torch.Tensor,
@@ -368,7 +380,7 @@ class AwqQuantizer:
         x_mean = x_mean.view(-1).to(device)
         w_mean = w_mean.view(-1).to(device)
 
-        for ratio in range(n_grid):
+        for ratio in range(n_grid): # 在1-20中随机取数字， 选取较好的scale
             # create new scales
             ratio = ratio / n_grid
 
@@ -387,9 +399,7 @@ class AwqQuantizer:
             # Q(W * s)
             for fc in linears2scale:
                 fc.weight.mul_(scales_view)
-                fc.weight.data = (
-                    self.pseudo_quantize_tensor(fc.weight.data)[0] / scales_view
-                )
+                fc.weight.data = (self.pseudo_quantize_tensor(fc.weight.data)[0] / scales_view)
 
             # W * X
             int_w_output = self._module_forward(x, module2inspect, kwargs)
@@ -398,7 +408,7 @@ class AwqQuantizer:
             loss = self._compute_loss(fp16_output, int_w_output, device)
 
             history.append(loss)
-            if loss < best_error:
+            if loss < best_error: # 网格搜索，取最好的
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()

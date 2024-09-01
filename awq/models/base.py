@@ -128,66 +128,35 @@ class BaseAWQForCausalLM(nn.Module):
             return self.model.generate(*args, **kwargs)
 
     @torch.no_grad()
-    def quantize(
-        self,
-        tokenizer: Annotated[
-            PreTrainedTokenizer, Doc("The tokenizer to use for quantization.")
-        ] = None,
-        quant_config: Annotated[
-            Dict, Doc("The quantization config you want to use.")
-        ] = {},
-        calib_data: Annotated[
-            Union[str, List[str]],
-            Doc(
-                "The calibration dataset. Either a string pointing to Huggingface or a list of preloaded examples."
-            ),
-        ] = "pileval",
-        split: Annotated[str, Doc("The split of calib_data.")] = "train",
-        text_column: Annotated[str, Doc("The text column of calib_data.")] = "text",
-        duo_scaling: Annotated[
-            bool, Doc("Whether to scale using both w/x or just x.")
-        ] = True,
-        export_compatible: Annotated[
-            bool,
-            Doc(
-                "This argument avoids real quantization by only applying the scales without quantizing down to FP16."
-            ),
-        ] = False,
-        apply_clip: Annotated[
-            bool,
-            Doc(
-                "Whether to apply clipping to the model during quantization. Some models may perform better with this set to False."
-            ),
-        ] = True,
-        n_parallel_calib_samples: Annotated[
-            int,
-            Doc(
-                "The number of parallel samples to run through the model. "
-                "A high number of parallel samples can result in OOM during quantization if max_calib_samples is high enough. "
-                "If None, runs through all samples at the same time. "
-                "You can set this to a low number for more memory efficient quantization."
-            ),
-        ] = None,
-        max_calib_samples: Annotated[
-            int, Doc("The maximum number of samples to run through the model.")
-        ] = 128,
-        max_calib_seq_len: Annotated[
-            int,
-            Doc(
-                "The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len."
-            ),
-        ] = 512,
-        max_chunk_memory: Annotated[
-            int,
-            Doc(
-                "The loss computation and per-channel mean is optimized into chunked computations."
-                " Adjust this parameter to increase or decrease memory usage for these computations."
-                " Default is 1GB (1024 * 1024 * 1024)."
-            ),
-        ] = 1024
-        * 1024
-        * 1024,
-    ):
+    def quantize(self,
+                 tokenizer: Annotated[PreTrainedTokenizer, Doc("The tokenizer to use for quantization.")] = None,
+                 quant_config: Annotated[Dict, Doc("The quantization config you want to use.")] = {},
+                 calib_data: Annotated[Union[str, List[str]], Doc(
+                     "The calibration dataset. Either a string pointing to Huggingface or a list of preloaded examples."),] = "pileval",
+                 split: Annotated[str, Doc("The split of calib_data.")] = "train",
+                 text_column: Annotated[str, Doc("The text column of calib_data.")] = "text",
+                 duo_scaling: Annotated[bool, Doc("Whether to scale using both w/x or just x.")] = True,
+                 export_compatible: Annotated[bool, Doc(
+                     "This argument avoids real quantization by only applying the scales without quantizing down to FP16."),] = False,
+                 apply_clip: Annotated[bool, Doc(
+                     "Whether to apply clipping to the model during quantization. Some models may perform better with this set to False."),] = True,
+                 n_parallel_calib_samples: Annotated[
+                     int, Doc("The number of parallel samples to run through the model. "
+                              "A high number of parallel samples can result in OOM during quantization if max_calib_samples is high enough. "
+                              "If None, runs through all samples at the same time. "
+                              "You can set this to a low number for more memory efficient quantization."
+                              ),] = None,
+                 max_calib_samples: Annotated[
+                     int, Doc("The maximum number of samples to run through the model.")] = 128,
+                 max_calib_seq_len: Annotated[int, Doc(
+                     "The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len."),] = 512,
+                 max_chunk_memory: Annotated[
+                     int, Doc("The loss computation and per-channel mean is optimized into chunked computations."
+                              " Adjust this parameter to increase or decrease memory usage for these computations."
+                              " Default is 1GB (1024 * 1024 * 1024)."
+                              ),] = 1024 * 1024 * 1024,
+
+                 ):
         """
         The main quantization function that you can use to quantize your model.
 
