@@ -82,10 +82,10 @@ class AwqQuantizer:
         if self.zero_point: # 真正的量化操作，类似 gptq中的 find_params操作
             max_val = w.amax(dim=1, keepdim=True)
             min_val = w.amin(dim=1, keepdim=True)
-            max_int = 2**self.w_bit - 1
+            max_int = 2**self.w_bit - 1 # 这里和AutoGPTQ类似，int8 也是 256-1=255
             min_int = 0
             scales = (max_val - min_val).clamp(min=1e-5) / max_int
-            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int) # 量化范围也是 0-255
             w = (
                 torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
             ) * scales
